@@ -13,6 +13,7 @@ export class WhoopMcpServer {
   private whoopClient: WhoopApiClient;
   private config: WhoopApiConfig;
   private isAuthorized: boolean = false;
+  private callbackServer: http.Server | null = null;
 
   constructor(config: WhoopApiConfig) {
     this.config = config;
@@ -26,11 +27,24 @@ export class WhoopMcpServer {
   }
 
   private startOAuthCallbackServer(): Promise<string> {
+    if (this.callbackServer) {
+      this.callbackServer.close();
+      this.callbackServer = null;
+    }
+
     return new Promise((resolve, reject) => {
-      const callbackServer = http.createServer(async (req, res) => {
+      this.callbackServer = http.createServer(async (req, res) => {
         try {
           const url = new URL(req.url || '', `http://localhost:${process.env.MCP_SERVER_PORT || '3001'}`);
           if (url.pathname === '/oauth/callback') {
+            const error = url.searchParams.get('error');
+            if (error) {
+              const desc = url.searchParams.get('error_description') || 'Unknown error';
+              res.writeHead(200, { 'Content-Type': 'text/html' });
+              res.end(`<html><body><h1>Authorization Error</h1><p>${error}: ${desc}</p></body></html>`);
+              return;
+            }
+
             const code = url.searchParams.get('code');
             if (code) {
               const tokenData = await this.whoopClient.exchangeCodeForToken(code);
@@ -38,7 +52,8 @@ export class WhoopMcpServer {
               this.isAuthorized = true;
               res.writeHead(200, { 'Content-Type': 'text/html' });
               res.end('<html><body><h1>WHOOP Authorization Successful!</h1><p>You can close this window and return to Claude.</p></body></html>');
-              callbackServer.close();
+              this.callbackServer?.close();
+              this.callbackServer = null;
               resolve(tokenData.access_token);
             } else {
               res.writeHead(400, { 'Content-Type': 'text/html' });
@@ -53,14 +68,27 @@ export class WhoopMcpServer {
       });
 
       const port = parseInt(process.env.MCP_SERVER_PORT || '3001');
-      callbackServer.listen(port, () => {
+
+      this.callbackServer.on('error', (err: NodeJS.ErrnoException) => {
+        console.error(`Callback server error: ${err.message}`);
+        if (err.code === 'EADDRINUSE') {
+          console.error(`Port ${port} in use, retrying in 1s...`);
+          this.callbackServer?.close();
+          setTimeout(() => {
+            this.callbackServer?.listen(port, '0.0.0.0');
+          }, 1000);
+        }
+      });
+
+      this.callbackServer.listen(port, '0.0.0.0', () => {
         console.error(`OAuth callback server listening on port ${port}`);
       });
 
       setTimeout(() => {
-        callbackServer.close();
-        reject(new Error('OAuth callback timed out after 5 minutes'));
-      }, 300000);
+        this.callbackServer?.close();
+        this.callbackServer = null;
+        reject(new Error('OAuth callback timed out after 10 minutes'));
+      }, 600000);
     });
   }
 
@@ -159,6 +187,20 @@ export class WhoopMcpServer {
             properties: {},
           },
         },
+        {
+          name: 'exchange_code',
+          description: 'Manually exchange an OAuth authorization code for an access token. Use this if the automatic callback failed. The code can be found in the browser URL bar after authorizing.',
+          inputSchema: {
+            type: 'object' as const,
+            properties: {
+              code: {
+                type: 'string',
+                description: 'The authorization code from the OAuth callback URL (the value after ?code= in the URL)',
+              },
+            },
+            required: ['code'],
+          },
+        },
       ],
     }));
 
@@ -166,6 +208,22 @@ export class WhoopMcpServer {
       const { name, arguments: args } = request.params;
 
       try {
+        if (name === 'exchange_code') {
+          const code = args?.code as string;
+          if (!code) {
+            return {
+              content: [{ type: 'text', text: 'Error: code parameter is required' }],
+              isError: true,
+            };
+          }
+          const tokenData = await this.whoopClient.exchangeCodeForToken(code);
+          this.whoopClient.setAccessToken(tokenData.access_token);
+          this.isAuthorized = true;
+          return {
+            content: [{ type: 'text', text: 'Authorization successful! You can now use the WHOOP data tools.' }],
+          };
+        }
+
         if (name === 'authorize_whoop') {
           const state = Math.random().toString(36).substring(2, 15) + Math.random().toString(36).substring(2, 15);
           const authUrl = this.whoopClient.getAuthorizationUrl(state);
