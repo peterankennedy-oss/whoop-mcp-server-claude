@@ -167,7 +167,8 @@ export class WhoopMcpServer {
 
       try {
         if (name === 'authorize_whoop') {
-          const authUrl = this.whoopClient.getAuthorizationUrl();
+          const state = Math.random().toString(36).substring(2, 15) + Math.random().toString(36).substring(2, 15);
+          const authUrl = this.whoopClient.getAuthorizationUrl(state);
           const callbackPromise = this.startOAuthCallbackServer();
           callbackPromise.then(() => {
             console.error('WHOOP authorization completed successfully');
