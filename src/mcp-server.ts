@@ -7,6 +7,13 @@ import {
 import { WhoopApiClient } from './whoop-api.js';
 import { WhoopApiConfig } from './types.js';
 import http from 'http';
+import fs from 'fs';
+import path from 'path';
+import { fileURLToPath } from 'url';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+const TOKEN_FILE = path.join(__dirname, '..', 'whoop-tokens.json');
 
 export class WhoopMcpServer {
   private server: Server;
@@ -23,7 +30,50 @@ export class WhoopMcpServer {
     });
 
     this.whoopClient = new WhoopApiClient(config);
+    this.loadTokens();
     this.setupToolHandlers();
+  }
+
+  private saveTokens(accessToken: string, refreshToken: string, expiresIn: number): void {
+    const data = {
+      accessToken,
+      refreshToken,
+      expiresAt: Date.now() + expiresIn * 1000,
+      timestamp: new Date().toISOString(),
+    };
+    try {
+      fs.writeFileSync(TOKEN_FILE, JSON.stringify(data, null, 2));
+      console.error('Tokens saved to', TOKEN_FILE);
+    } catch (err) {
+      console.error('Failed to save tokens:', err);
+    }
+  }
+
+  private loadTokens(): void {
+    try {
+      if (!fs.existsSync(TOKEN_FILE)) return;
+
+      const data = JSON.parse(fs.readFileSync(TOKEN_FILE, 'utf8'));
+      if (!data.accessToken) return;
+
+      if (data.expiresAt && Date.now() > data.expiresAt && data.refreshToken) {
+        console.error('Access token expired, refreshing...');
+        this.whoopClient.refreshToken(data.refreshToken).then((tokenData) => {
+          this.whoopClient.setAccessToken(tokenData.access_token);
+          this.isAuthorized = true;
+          this.saveTokens(tokenData.access_token, tokenData.refresh_token, tokenData.expires_in);
+          console.error('Token refreshed successfully');
+        }).catch((err) => {
+          console.error('Token refresh failed:', err);
+        });
+      } else {
+        this.whoopClient.setAccessToken(data.accessToken);
+        this.isAuthorized = true;
+        console.error('Loaded saved tokens from', TOKEN_FILE);
+      }
+    } catch (err) {
+      console.error('Failed to load tokens:', err);
+    }
   }
 
   private startOAuthCallbackServer(): Promise<string> {
@@ -50,6 +100,7 @@ export class WhoopMcpServer {
               const tokenData = await this.whoopClient.exchangeCodeForToken(code);
               this.whoopClient.setAccessToken(tokenData.access_token);
               this.isAuthorized = true;
+              this.saveTokens(tokenData.access_token, tokenData.refresh_token, tokenData.expires_in);
               res.writeHead(200, { 'Content-Type': 'text/html' });
               res.end('<html><body><h1>WHOOP Authorization Successful!</h1><p>You can close this window and return to Claude.</p></body></html>');
               this.callbackServer?.close();
@@ -219,6 +270,7 @@ export class WhoopMcpServer {
           const tokenData = await this.whoopClient.exchangeCodeForToken(code);
           this.whoopClient.setAccessToken(tokenData.access_token);
           this.isAuthorized = true;
+          this.saveTokens(tokenData.access_token, tokenData.refresh_token, tokenData.expires_in);
           return {
             content: [{ type: 'text', text: 'Authorization successful! You can now use the WHOOP data tools.' }],
           };
