@@ -56,7 +56,9 @@ export class WhoopMcpServer {
       const data = JSON.parse(fs.readFileSync(TOKEN_FILE, 'utf8'));
       if (!data.accessToken) return;
 
-      if (data.expiresAt && Date.now() > data.expiresAt && data.refreshToken) {
+      const isExpired = data.expiresAt && Date.now() > data.expiresAt;
+
+      if (isExpired && data.refreshToken) {
         console.error('Access token expired, refreshing...');
         this.whoopClient.refreshToken(data.refreshToken).then((tokenData) => {
           this.whoopClient.setAccessToken(tokenData.access_token);
@@ -64,8 +66,12 @@ export class WhoopMcpServer {
           this.saveTokens(tokenData.access_token, tokenData.refresh_token, tokenData.expires_in);
           console.error('Token refreshed successfully');
         }).catch((err) => {
-          console.error('Token refresh failed:', err);
+          console.error('Token refresh failed, re-authorization needed:', err);
+          this.isAuthorized = false;
         });
+      } else if (isExpired) {
+        console.error('Access token expired and no refresh token available. Re-authorization needed.');
+        this.isAuthorized = false;
       } else {
         this.whoopClient.setAccessToken(data.accessToken);
         this.isAuthorized = true;
