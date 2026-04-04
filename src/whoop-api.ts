@@ -21,7 +21,7 @@ export class WhoopApiClient {
   constructor(config: WhoopApiConfig) {
     this.config = config;
     this.client = axios.create({
-      baseURL: 'https://api.prod.whoop.com/developer/v2',
+      baseURL: 'https://api.prod.whoop.com/developer/v1',
       headers: {
         'Content-Type': 'application/json',
       },
