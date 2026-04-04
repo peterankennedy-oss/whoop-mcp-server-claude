@@ -21,7 +21,7 @@ export class WhoopApiClient {
   constructor(config: WhoopApiConfig) {
     this.config = config;
     this.client = axios.create({
-      baseURL: 'https://api.prod.whoop.com/developer/v1',
+      baseURL: 'https://api.prod.whoop.com/developer/v2',
       headers: {
         'Content-Type': 'application/json',
       },
@@ -142,7 +142,7 @@ export class WhoopApiClient {
       client_id: this.config.clientId,
       redirect_uri: this.config.redirectUri,
       response_type: 'code',
-      scope: 'read:recovery read:cycles read:workout read:sleep read:profile read:body_measurement'
+      scope: 'read:recovery read:cycles read:workout read:sleep read:profile read:body_measurement offline'
     });
     
     if (state) {
