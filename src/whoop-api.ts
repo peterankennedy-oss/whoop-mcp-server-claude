@@ -175,6 +175,7 @@ export class WhoopApiClient {
     formData.append('client_secret', this.config.clientSecret);
     formData.append('refresh_token', refreshToken);
     formData.append('grant_type', 'refresh_token');
+    formData.append('scope', 'offline');
 
     const response = await axios.post('https://api.prod.whoop.com/oauth/oauth2/token', formData, {
       headers: {
