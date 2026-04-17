@@ -11,12 +11,16 @@ import {
   WhoopSleepCollection,
   WhoopWorkout,
   WhoopWorkoutCollection,
-  PaginationParams
+  PaginationParams,
+  TokenRefreshCallback
 } from './types.js';
 
 export class WhoopApiClient {
   private client: AxiosInstance;
   private config: WhoopApiConfig;
+  private isRefreshing: boolean = false;
+  private failedQueue: Array<{ resolve: (value?: unknown) => void; reject: (reason?: unknown) => void }> = [];
+  private onTokenRefresh?: TokenRefreshCallback;
 
   constructor(config: WhoopApiConfig) {
     this.config = config;
@@ -34,10 +38,74 @@ export class WhoopApiClient {
       }
       return config;
     });
+
+    // Add response interceptor for automatic mid-session token refresh
+    this.client.interceptors.response.use(
+      (response) => response,
+      async (error) => {
+        const originalRequest = error.config;
+
+        // Only attempt refresh on 401, if we haven't already retried, and we have a refresh token
+        if (error.response?.status === 401 && !(originalRequest as any)._retry && this.config.refreshToken) {
+          // If another refresh is already in progress, queue this request
+          if (this.isRefreshing) {
+            return new Promise((resolve, reject) => {
+              this.failedQueue.push({ resolve, reject });
+            }).then(() => {
+              originalRequest.headers.Authorization = `Bearer ${this.config.accessToken}`;
+              return this.client(originalRequest);
+            });
+          }
+
+          (originalRequest as any)._retry = true;
+          this.isRefreshing = true;
+
+          try {
+            console.error('Access token expired mid-session, auto-refreshing...');
+            const tokenData = await this.refreshToken(this.config.refreshToken);
+
+            // Update stored tokens
+            this.config.accessToken = tokenData.access_token;
+            const newRefreshToken = tokenData.refresh_token || this.config.refreshToken;
+            this.config.refreshToken = newRefreshToken;
+
+            // Notify the MCP server to save tokens to disk
+            if (this.onTokenRefresh) {
+              this.onTokenRefresh(tokenData.access_token, newRefreshToken, tokenData.expires_in);
+            }
+
+            // Resolve all queued requests so they retry with the new token
+            this.failedQueue.forEach(({ resolve }) => resolve(undefined));
+            this.failedQueue = [];
+
+            // Retry the original request with the new token
+            originalRequest.headers.Authorization = `Bearer ${tokenData.access_token}`;
+            return this.client(originalRequest);
+          } catch (refreshError) {
+            console.error('Mid-session token refresh failed:', refreshError);
+            this.failedQueue.forEach(({ reject }) => reject(refreshError));
+            this.failedQueue = [];
+            throw refreshError;
+          } finally {
+            this.isRefreshing = false;
+          }
+        }
+
+        throw error;
+      }
+    );
+  }
+
+  setOnTokenRefresh(callback: TokenRefreshCallback) {
+    this.onTokenRefresh = callback;
   }
 
   setAccessToken(accessToken: string) {
     this.config.accessToken = accessToken;
+  }
+
+  setRefreshToken(refreshToken: string) {
+    this.config.refreshToken = refreshToken;
   }
 
   // User endpoints
@@ -175,6 +243,7 @@ export class WhoopApiClient {
     formData.append('client_secret', this.config.clientSecret);
     formData.append('refresh_token', refreshToken);
     formData.append('grant_type', 'refresh_token');
+    formData.append('scope', 'offline');
 
     const response = await axios.post('https://api.prod.whoop.com/oauth/oauth2/token', formData, {
       headers: {

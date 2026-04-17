@@ -158,7 +158,14 @@ export interface WhoopApiConfig {
   clientSecret: string;
   redirectUri: string;
   accessToken?: string;
+  refreshToken?: string;
 }
+
+export type TokenRefreshCallback = (
+  accessToken: string,
+  refreshToken: string,
+  expiresIn: number
+) => void;
 
 export interface PaginationParams {
   limit?: number;

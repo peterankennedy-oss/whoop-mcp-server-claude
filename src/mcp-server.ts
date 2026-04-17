@@ -21,6 +21,7 @@ export class WhoopMcpServer {
   private config: WhoopApiConfig;
   private isAuthorized: boolean = false;
   private callbackServer: http.Server | null = null;
+  private tokenRefreshPromise: Promise<void> | null = null;
 
   constructor(config: WhoopApiConfig) {
     this.config = config;
@@ -30,8 +31,26 @@ export class WhoopMcpServer {
     });
 
     this.whoopClient = new WhoopApiClient(config);
-    this.loadTokens();
+
+    // Auto-save tokens when the API client refreshes mid-session
+    this.whoopClient.setOnTokenRefresh((accessToken, refreshToken, expiresIn) => {
+      console.error('Token auto-refreshed mid-session, saving to disk...');
+      this.isAuthorized = true;
+      this.saveTokens(accessToken, refreshToken, expiresIn);
+    });
+
+    this.tokenRefreshPromise = this.loadTokens();
     this.setupToolHandlers();
+  }
+
+  private toISOStart(date: string): string {
+    if (date.includes('T')) return date;
+    return `${date}T00:00:00.000Z`;
+  }
+
+  private toISOEnd(date: string): string {
+    if (date.includes('T')) return date;
+    return `${date}T23:59:59.999Z`;
   }
 
   private saveTokens(accessToken: string, refreshToken: string, expiresIn: number): void {
@@ -49,31 +68,39 @@ export class WhoopMcpServer {
     }
   }
 
-  private loadTokens(): void {
+  private async loadTokens(): Promise<void> {
     try {
       if (!fs.existsSync(TOKEN_FILE)) return;
 
       const data = JSON.parse(fs.readFileSync(TOKEN_FILE, 'utf8'));
       if (!data.accessToken) return;
 
-      const isExpired = data.expiresAt && Date.now() > data.expiresAt;
+      // Refresh if expired OR expiring within 5 minutes (buffer to avoid mid-call expiry)
+      const isExpired = data.expiresAt && Date.now() > (data.expiresAt - 5 * 60 * 1000);
 
       if (isExpired && data.refreshToken) {
         console.error('Access token expired, refreshing...');
-        this.whoopClient.refreshToken(data.refreshToken).then((tokenData) => {
+        try {
+          const tokenData = await this.whoopClient.refreshToken(data.refreshToken);
           this.whoopClient.setAccessToken(tokenData.access_token);
           this.isAuthorized = true;
-          this.saveTokens(tokenData.access_token, tokenData.refresh_token, tokenData.expires_in);
+          // Fall back to existing refresh token if the server didn't return a new one
+          const newRefreshToken = tokenData.refresh_token || data.refreshToken;
+          this.whoopClient.setRefreshToken(newRefreshToken);
+          this.saveTokens(tokenData.access_token, newRefreshToken, tokenData.expires_in);
           console.error('Token refreshed successfully');
-        }).catch((err) => {
+        } catch (err) {
           console.error('Token refresh failed, re-authorization needed:', err);
           this.isAuthorized = false;
-        });
+        }
       } else if (isExpired) {
         console.error('Access token expired and no refresh token available. Re-authorization needed.');
         this.isAuthorized = false;
       } else {
         this.whoopClient.setAccessToken(data.accessToken);
+        if (data.refreshToken) {
+          this.whoopClient.setRefreshToken(data.refreshToken);
+        }
         this.isAuthorized = true;
         console.error('Loaded saved tokens from', TOKEN_FILE);
       }
@@ -105,6 +132,7 @@ export class WhoopMcpServer {
             if (code) {
               const tokenData = await this.whoopClient.exchangeCodeForToken(code);
               this.whoopClient.setAccessToken(tokenData.access_token);
+              this.whoopClient.setRefreshToken(tokenData.refresh_token);
               this.isAuthorized = true;
               this.saveTokens(tokenData.access_token, tokenData.refresh_token, tokenData.expires_in);
               res.writeHead(200, { 'Content-Type': 'text/html' });
@@ -275,6 +303,7 @@ export class WhoopMcpServer {
           }
           const tokenData = await this.whoopClient.exchangeCodeForToken(code);
           this.whoopClient.setAccessToken(tokenData.access_token);
+          this.whoopClient.setRefreshToken(tokenData.refresh_token);
           this.isAuthorized = true;
           this.saveTokens(tokenData.access_token, tokenData.refresh_token, tokenData.expires_in);
           return {
@@ -299,6 +328,12 @@ export class WhoopMcpServer {
           };
         }
 
+        // Wait for any pending token refresh before checking auth
+        if (this.tokenRefreshPromise) {
+          await this.tokenRefreshPromise;
+          this.tokenRefreshPromise = null;
+        }
+
         if (!this.isAuthorized) {
           return {
             content: [{
@@ -311,36 +346,44 @@ export class WhoopMcpServer {
 
         switch (name) {
           case 'get_recovery': {
+            const startDate = args?.startDate as string;
+            const endDate = args?.endDate as string;
             const data = await this.whoopClient.getRecoveryCollection({
-              start: args?.startDate as string,
-              end: args?.endDate as string,
+              start: startDate ? this.toISOStart(startDate) : undefined,
+              end: endDate ? this.toISOEnd(endDate) : undefined,
             });
             return {
               content: [{ type: 'text', text: JSON.stringify(data, null, 2) }],
             };
           }
           case 'get_sleep': {
+            const startDate = args?.startDate as string;
+            const endDate = args?.endDate as string;
             const data = await this.whoopClient.getSleepCollection({
-              start: args?.startDate as string,
-              end: args?.endDate as string,
+              start: startDate ? this.toISOStart(startDate) : undefined,
+              end: endDate ? this.toISOEnd(endDate) : undefined,
             });
             return {
               content: [{ type: 'text', text: JSON.stringify(data, null, 2) }],
             };
           }
           case 'get_workouts': {
+            const startDate = args?.startDate as string;
+            const endDate = args?.endDate as string;
             const data = await this.whoopClient.getWorkoutCollection({
-              start: args?.startDate as string,
-              end: args?.endDate as string,
+              start: startDate ? this.toISOStart(startDate) : undefined,
+              end: endDate ? this.toISOEnd(endDate) : undefined,
             });
             return {
               content: [{ type: 'text', text: JSON.stringify(data, null, 2) }],
             };
           }
           case 'get_cycles': {
+            const startDate = args?.startDate as string;
+            const endDate = args?.endDate as string;
             const data = await this.whoopClient.getCycleCollection({
-              start: args?.startDate as string,
-              end: args?.endDate as string,
+              start: startDate ? this.toISOStart(startDate) : undefined,
+              end: endDate ? this.toISOEnd(endDate) : undefined,
             });
             return {
               content: [{ type: 'text', text: JSON.stringify(data, null, 2) }],
